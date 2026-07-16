@@ -173,7 +173,7 @@ canvas{max-height:280px;}
       <section id="tab-captura">
         <div class="card">
           <h2>Registro del día</h2>
-          <div class="sub">Elige la fecha. Si ya existe un registro, se cargará para editarlo. Kg producidos y devolución se calculan solos a partir de lo que captures abajo.</div>
+          <div class="sub">Elige la fecha. Si ya existe un registro, se cargará para editarlo. Salida de kg y devolución se calculan solos a partir de lo que captures abajo.</div>
           <div class="row">
             <div class="field">
               <label>Fecha</label>
@@ -181,12 +181,16 @@ canvas{max-height:280px;}
             </div>
             <button class="btn ghost small" id="copiarAnteriorBtn" type="button">Copiar del día anterior</button>
             <div class="field">
-              <label>Kg producidos (auto)</label>
+              <label>Salida de kg (auto)</label>
               <input type="text" id="kgProducidosView" readonly>
             </div>
             <div class="field">
               <label>Devolución KG (auto)</label>
               <input type="text" id="devolucionView" readonly>
+            </div>
+            <div class="field">
+              <label>Salida de kg − devoluciones</label>
+              <input type="text" id="kgNetoView" readonly>
             </div>
           </div>
         </div>
@@ -315,7 +319,7 @@ canvas{max-height:280px;}
 /* ============================ ESTADO Y STORAGE ============================ */
 const DEFAULT_CONFIG = {
   sucursales: [
-    {nombre:"Sucursal Principal", rutas:["R1","R2","R3","R2.5","R5","R6","R7"]}
+    {nombre:"Sucursal Principal", rutas:["Ventas de mostrador","R1","R2","R3","R2.5","R5","R6","R7"]}
   ],
   categorias: ["Harina","Papel","Gas","Antiadherente","Nómina","Gasolina","Grafito","Rentas","Luz","Agua","Limpieza","Refacciones","Otros"],
   precioKg: 18,
@@ -390,11 +394,25 @@ function toast(msg){
 const STORAGE_KEY_CONFIG = 'tortilleria_config_v2';
 const STORAGE_KEY_RECORDS = 'tortilleria_records_v2';
 
+const VENTAS_MOSTRADOR = 'Ventas de mostrador';
+
 async function loadConfig(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY_CONFIG);
     CONFIG = raw ? JSON.parse(raw) : structuredClone(DEFAULT_CONFIG);
   }catch(e){ console.error('Error cargando configuración', e); CONFIG = structuredClone(DEFAULT_CONFIG); }
+  ensureVentasMostrador();
+}
+
+function ensureVentasMostrador(){
+  let changed = false;
+  CONFIG.sucursales.forEach(suc=>{
+    if(!suc.rutas.includes(VENTAS_MOSTRADOR)){
+      suc.rutas.unshift(VENTAS_MOSTRADOR);
+      changed = true;
+    }
+  });
+  if(changed) saveConfig();
 }
 async function saveConfig(){
   try{ localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(CONFIG)); }
@@ -439,7 +457,7 @@ function computeMetrics(r){
     suc.rutas.forEach(ruta=>{
       const d = (r.sucursales[suc.nombre] && r.sucursales[suc.nombre][ruta]) || {kg:0,merma:0,recaudado:0};
       const dk=num(d.kg), dm=num(d.merma), dr=num(d.recaudado);
-      const dv = dk * CONFIG.precioKg;
+      const dv = Math.max(0, dk - dm) * CONFIG.precioKg;
       sKg+=dk; sMerma+=dm; sVenta+=dv; sRecaudado+=dr;
       porRuta.push({sucursal:suc.nombre, ruta, kg:dk, merma:dm, venta:dv, recaudado:dr, deficit:dv-dr});
     });
@@ -506,7 +524,7 @@ function renderSucursalesNested(record){
     let rows = '';
     suc.rutas.forEach(ruta=>{
       const d = (record.sucursales[suc.nombre] && record.sucursales[suc.nombre][ruta]) || {kg:0,merma:0,recaudado:0};
-      const ventaCalc = num(d.kg) * CONFIG.precioKg;
+      const ventaCalc = Math.max(0, num(d.kg) - num(d.merma)) * CONFIG.precioKg;
       rows += `<tr>
         <td>${ruta}</td>
         <td><input type="number" step="0.01" data-suc="${suc.nombre}" data-ruta="${ruta}" data-field="kg" value="${d.kg||0}"></td>
@@ -561,8 +579,10 @@ function updateCapturaTotals(){
   document.querySelectorAll('#sucursalesContainer [data-ventacell]').forEach(cell=>{
     const [suc, ruta] = cell.dataset.ventacell.split('|');
     const kgInput = document.querySelector(`#sucursalesContainer input[data-suc="${suc}"][data-ruta="${ruta}"][data-field="kg"]`);
+    const mermaInput = document.querySelector(`#sucursalesContainer input[data-suc="${suc}"][data-ruta="${ruta}"][data-field="merma"]`);
     const kgVal = kgInput ? num(kgInput.value) : 0;
-    cell.textContent = money(kgVal * CONFIG.precioKg);
+    const mermaVal = mermaInput ? num(mermaInput.value) : 0;
+    cell.textContent = money(Math.max(0, kgVal - mermaVal) * CONFIG.precioKg);
   });
   const r = readCapturaForm();
   const m = computeMetrics(r);
@@ -573,6 +593,7 @@ function updateCapturaTotals(){
   document.getElementById('totGastos').textContent = money(m.totGastos);
   document.getElementById('kgProducidosView').value = kg(m.kgProducidos);
   document.getElementById('devolucionView').value = kg(m.devolucionKg);
+  document.getElementById('kgNetoView').value = kg(m.kgProducidos - m.devolucionKg);
   document.getElementById('previewResumen').innerHTML =
     `Utilidad operativa: <b>${money(m.utilidadOperativa)}</b> &nbsp;|&nbsp; Utilidad neta: <b>${money(m.utilidadNeta)}</b> &nbsp;|&nbsp; Déficit recaudación: <b>${money(m.deficitRecaudacion)}</b>`;
 }
@@ -792,7 +813,8 @@ function renderResultados(){
       <div class="kpi"><div class="label">Gastos totales</div><div class="value">${money(agg.totGastos)}</div></div>
       <div class="kpi"><div class="label">Utilidad operativa</div><div class="value ${agg.utilidadOperativa>=0?'good':'bad'}">${money(agg.utilidadOperativa)}</div></div>
       <div class="kpi"><div class="label">Utilidad neta</div><div class="value ${agg.utilidadNeta>=0?'good':'bad'}">${money(agg.utilidadNeta)}</div></div>
-      <div class="kpi"><div class="label">KG producidos</div><div class="value">${Math.round(agg.kgProducidos)}</div></div>
+      <div class="kpi"><div class="label">Salida de kg</div><div class="value">${Math.round(agg.kgProducidos)}</div></div>
+      <div class="kpi"><div class="label">Salida de kg − devoluciones</div><div class="value">${Math.round(agg.kgProducidos - agg.totMerma)}</div></div>
       <div class="kpi"><div class="label">Merma / devolución</div><div class="value">${Math.round(agg.totMerma)} kg</div></div>
       <div class="kpi"><div class="label">Déficit de recaudación</div><div class="value ${agg.deficit<=0?'good':'bad'}">${money(agg.deficit)}</div></div>
     </div>
@@ -880,8 +902,9 @@ document.getElementById('exportExcelBtn').addEventListener('click', ()=>{
       ['Utilidad operativa', Math.round(agg.utilidadOperativa)],
       ['Impuestos', Math.round(agg.utilidadOperativa>0 ? (agg.utilidadOperativa-agg.utilidadNeta) : 0)],
       ['Utilidad neta', Math.round(agg.utilidadNeta)],
-      ['KG producidos', Math.round(agg.kgProducidos)],
+      ['Salida de kg', Math.round(agg.kgProducidos)],
       ['Merma / devolución (kg)', Math.round(agg.totMerma)],
+      ['Salida de kg − devoluciones', Math.round(agg.kgProducidos - agg.totMerma)],
       ['Déficit de recaudación', Math.round(agg.deficit)]
     ];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(resumenData), 'Resumen');
@@ -931,8 +954,9 @@ document.getElementById('exportPdfBtn').addEventListener('click', ()=>{
       ['Gastos totales', money(agg.totGastos)],
       ['Utilidad operativa', money(agg.utilidadOperativa)],
       ['Utilidad neta', money(agg.utilidadNeta)],
-      ['KG producidos', Math.round(agg.kgProducidos)+' kg'],
+      ['Salida de kg', Math.round(agg.kgProducidos)+' kg'],
       ['Merma / devolución', Math.round(agg.totMerma)+' kg'],
+      ['Salida de kg − devoluciones', Math.round(agg.kgProducidos - agg.totMerma)+' kg'],
       ['Déficit de recaudación', money(agg.deficit)]
     ];
     doc.autoTable({
@@ -1064,7 +1088,7 @@ function renderConfig(){
 document.getElementById('addSucursal').addEventListener('click', async ()=>{
   const inp = document.getElementById('nuevaSucursal');
   const v = inp.value.trim();
-  if(v && !CONFIG.sucursales.some(x=>x.nombre===v)){ CONFIG.sucursales.push({nombre:v, rutas:[]}); await saveConfig(); renderConfig(); inp.value=''; }
+  if(v && !CONFIG.sucursales.some(x=>x.nombre===v)){ CONFIG.sucursales.push({nombre:v, rutas:[VENTAS_MOSTRADOR]}); await saveConfig(); renderConfig(); inp.value=''; }
 });
 document.getElementById('addCategoria').addEventListener('click', async ()=>{
   const inp = document.getElementById('nuevaCategoria');
