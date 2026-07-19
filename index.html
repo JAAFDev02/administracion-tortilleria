@@ -610,13 +610,13 @@ function computeMetrics(r){
   });
   let totGastos = 0;
   CONFIG.categorias.forEach(x=> totGastos += num(r.gastos[x]));
-  const kgProducidos = totKg + totMerma;
+  const kgProducidos = totKg ;
   const devolucionKg = totMerma;
   const mermaPesos = totMerma * CONFIG.precioMerma;
   const deficitRecaudacion = totVenta - totRecaudado;
   const utilidadOperativa = totVenta - totGastos;
   const impuestos = utilidadOperativa > 0 ? utilidadOperativa * (CONFIG.tasaImpuesto/100) : 0;
-  const utilidadNeta = utilidadOperativa - impuestos;
+  const utilidadNeta = utilidadOperativa - impuestos - deficitRecaudacion;
   return {totKg, totMerma, totVenta, totRecaudado, totGastos, devolucionKg, mermaPesos, kgProducidos,
            deficitRecaudacion, utilidadOperativa, impuestos, utilidadNeta, porSucursal, porRuta};
 }
