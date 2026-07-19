@@ -303,6 +303,35 @@ canvas{max-height:280px;}
         </div>
 
         <div class="card">
+          <h2>Sincronización en la nube</h2>
+          <div class="sub" id="cloudSub">Conecta un proyecto gratuito de Firebase para que todos tus dispositivos y personas vean los mismos datos, en tiempo real.</div>
+
+          <div id="cloudDisconnected">
+            <div class="row">
+              <div class="field"><label>API Key</label><input type="text" id="fbApiKey" placeholder="AIzaSy..."></div>
+              <div class="field"><label>Auth Domain</label><input type="text" id="fbAuthDomain" placeholder="tuproyecto.firebaseapp.com"></div>
+              <div class="field"><label>Project ID</label><input type="text" id="fbProjectId" placeholder="tuproyecto"></div>
+            </div>
+            <div class="row" style="margin-top:10px;">
+              <div class="field"><label>Storage Bucket (opcional)</label><input type="text" id="fbStorageBucket" placeholder="tuproyecto.appspot.com"></div>
+              <div class="field"><label>Messaging Sender ID (opcional)</label><input type="text" id="fbSenderId" placeholder="123456789"></div>
+              <div class="field"><label>App ID</label><input type="text" id="fbAppId" placeholder="1:123:web:abc..."></div>
+            </div>
+            <button class="btn secondary" id="conectarCloudBtn" style="margin-top:12px;">Conectar</button>
+            <div class="hint">Estos datos los obtienes gratis creando un proyecto en Firebase. Pídele a Claude las instrucciones paso a paso si no las tienes a la mano.</div>
+          </div>
+
+          <div id="cloudConnected" class="hidden">
+            <div style="color:var(--good);font-weight:700;">✅ Conectado a la nube — este dispositivo comparte datos en tiempo real.</div>
+            <div class="row" style="margin-top:10px;">
+              <button class="btn small" id="subirLocalBtn" type="button">Subir mis datos locales a la nube</button>
+              <button class="btn small danger" id="desconectarCloudBtn" type="button">Desconectar</button>
+            </div>
+            <div class="hint">Usa "Subir mis datos locales" una sola vez, la primera vez que conectas un dispositivo que ya tenía información capturada, para no perderla.</div>
+          </div>
+        </div>
+
+        <div class="card">
           <h2>Datos</h2>
           <div class="sub">Borra todos los registros capturados (no se puede deshacer).</div>
           <button class="btn danger" id="resetBtn">Borrar todos los registros</button>
@@ -393,8 +422,82 @@ function toast(msg){
 
 const STORAGE_KEY_CONFIG = 'tortilleria_config_v2';
 const STORAGE_KEY_RECORDS = 'tortilleria_records_v2';
+const STORAGE_KEY_FBCONFIG = 'tortilleria_firebase_config_v1';
 
 const VENTAS_MOSTRADOR = 'Ventas de mostrador';
+
+/* ---------- Nube (Firebase) ---------- */
+let CLOUD_MODE = false;
+let fbApp = null, db = null, fbAuth = null;
+let unsubRecords = null, unsubConfig = null;
+let preCloudRecords = null, preCloudConfig = null; // respaldo justo antes de conectar, para "subir datos locales"
+
+function getSavedFirebaseConfig(){
+  try{
+    const raw = localStorage.getItem(STORAGE_KEY_FBCONFIG);
+    return raw ? JSON.parse(raw) : null;
+  }catch(e){ return null; }
+}
+function saveFirebaseConfigLocal(cfg){
+  try{ localStorage.setItem(STORAGE_KEY_FBCONFIG, JSON.stringify(cfg)); }catch(e){ console.error(e); }
+}
+function clearFirebaseConfigLocal(){
+  try{ localStorage.removeItem(STORAGE_KEY_FBCONFIG); }catch(e){ console.error(e); }
+}
+
+async function connectFirebase(cfg){
+  try{
+    if(typeof firebase === 'undefined'){
+      const ok1 = await loadScript(['https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js']);
+      if(!ok1 || typeof firebase === 'undefined'){ toast('No se pudo cargar Firebase. Revisa tu conexión a internet.'); return false; }
+      await loadScript(['https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js']);
+      await loadScript(['https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js']);
+    }
+    fbApp = firebase.apps && firebase.apps.length ? firebase.app() : firebase.initializeApp(cfg);
+    db = firebase.firestore();
+    fbAuth = firebase.auth();
+    await fbAuth.signInAnonymously();
+    CLOUD_MODE = true;
+    attachCloudListeners();
+    return true;
+  }catch(e){
+    console.error('Error conectando a Firebase', e);
+    toast('No se pudo conectar. Revisa: los datos copiados, que Firestore esté creado, y que el inicio de sesión "Anónimo" esté activado.');
+    CLOUD_MODE = false;
+    return false;
+  }
+}
+
+function attachCloudListeners(){
+  if(unsubConfig) unsubConfig();
+  if(unsubRecords) unsubRecords();
+  unsubConfig = db.collection('meta').doc('config').onSnapshot(async (docSnap)=>{
+    if(docSnap.exists){
+      CONFIG = docSnap.data();
+      ensureVentasMostrador();
+    } else {
+      try{ await db.collection('meta').doc('config').set(CONFIG); }catch(e){ console.error(e); }
+    }
+    refreshAllUI();
+  }, (err)=>{ console.error('Error escuchando configuración en la nube', err); toast('Error de sincronización (configuración)'); });
+
+  unsubRecords = db.collection('records').onSnapshot((snapshot)=>{
+    const nuevo = {};
+    snapshot.forEach(d=> nuevo[d.id] = d.data());
+    RECORDS = nuevo;
+    refreshAllUI();
+  }, (err)=>{ console.error('Error escuchando registros en la nube', err); toast('Error de sincronización (registros)'); });
+}
+
+function refreshAllUI(){
+  renderRecordList();
+  if(!document.getElementById('tab-resultados').classList.contains('hidden')){ populateFilterOptions(); renderResultados(); }
+  if(!document.getElementById('tab-config').classList.contains('hidden')){ renderConfig(); }
+  const dateShown = document.getElementById('capturaFecha').value;
+  if(!document.getElementById('tab-captura').classList.contains('hidden') && dateShown){
+    loadRecordIntoForm(dateShown);
+  }
+}
 
 async function loadConfig(){
   try{
@@ -414,20 +517,61 @@ function ensureVentasMostrador(){
   });
   if(changed) saveConfig();
 }
+
 async function saveConfig(){
+  if(CLOUD_MODE){
+    try{ await db.collection('meta').doc('config').set(CONFIG); }
+    catch(e){ console.error('Error guardando configuración en la nube', e); toast('Error al guardar en la nube'); }
+    return;
+  }
   try{ localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(CONFIG)); }
   catch(e){ console.error('Error guardando configuración', e); toast('Error al guardar configuración'); }
 }
+
 async function loadRecords(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY_RECORDS);
     RECORDS = raw ? JSON.parse(raw) : {};
   }catch(e){ console.error('Error cargando registros', e); RECORDS = {}; }
 }
-async function saveRecords(){
+
+async function saveOneRecord(date, record){
+  RECORDS[date] = record;
+  if(CLOUD_MODE){
+    try{ await db.collection('records').doc(date).set(record); }
+    catch(e){ console.error('Error guardando registro en la nube', e); toast('Error al guardar en la nube'); }
+    return;
+  }
   try{ localStorage.setItem(STORAGE_KEY_RECORDS, JSON.stringify(RECORDS)); }
   catch(e){ console.error('Error guardando registros', e); toast('Error al guardar'); }
 }
+
+async function deleteOneRecord(date){
+  delete RECORDS[date];
+  if(CLOUD_MODE){
+    try{ await db.collection('records').doc(date).delete(); }
+    catch(e){ console.error('Error eliminando registro en la nube', e); toast('Error al eliminar en la nube'); }
+    return;
+  }
+  try{ localStorage.setItem(STORAGE_KEY_RECORDS, JSON.stringify(RECORDS)); }
+  catch(e){ console.error('Error guardando registros', e); toast('Error al guardar'); }
+}
+
+async function clearAllRecords(){
+  if(CLOUD_MODE){
+    try{
+      const snap = await db.collection('records').get();
+      const batch = db.batch();
+      snap.forEach(d=> batch.delete(d.ref));
+      await batch.commit();
+    }catch(e){ console.error('Error borrando en la nube', e); toast('Error al borrar en la nube'); }
+  }
+  RECORDS = {};
+  if(!CLOUD_MODE){
+    try{ localStorage.setItem(STORAGE_KEY_RECORDS, JSON.stringify(RECORDS)); }catch(e){ console.error(e); }
+  }
+}
+
 
 /* ============================ UTILIDADES ============================ */
 function num(v){ const n = parseFloat(v); return isNaN(n) ? 0 : n; }
@@ -625,8 +769,7 @@ document.getElementById('copiarAnteriorBtn').addEventListener('click', ()=>{
 
 document.getElementById('guardarBtn').addEventListener('click', async ()=>{
   const r = readCapturaForm();
-  RECORDS[r.date] = r;
-  await saveRecords();
+  await saveOneRecord(r.date, r);
   toast('Día guardado: ' + r.date);
   renderRecordList();
 });
@@ -650,8 +793,7 @@ function renderRecordList(){
   wrap.querySelectorAll('[data-edit]').forEach(b=> b.addEventListener('click', ()=> loadRecordIntoForm(b.dataset.edit)));
   wrap.querySelectorAll('[data-del]').forEach(b=> b.addEventListener('click', async ()=>{
     if(confirm('¿Eliminar el registro del ' + b.dataset.del + '?')){
-      delete RECORDS[b.dataset.del];
-      await saveRecords();
+      await deleteOneRecord(b.dataset.del);
       renderRecordList();
       toast('Registro eliminado');
     }
@@ -1083,6 +1225,12 @@ function renderConfig(){
   document.getElementById('precioKg').value = CONFIG.precioKg;
   document.getElementById('precioMerma').value = CONFIG.precioMerma;
   document.getElementById('tasaImpuesto').value = CONFIG.tasaImpuesto;
+  renderCloudSection();
+}
+
+function renderCloudSection(){
+  document.getElementById('cloudDisconnected').classList.toggle('hidden', CLOUD_MODE);
+  document.getElementById('cloudConnected').classList.toggle('hidden', !CLOUD_MODE);
 }
 
 document.getElementById('addSucursal').addEventListener('click', async ()=>{
@@ -1104,11 +1252,63 @@ document.getElementById('guardarConfigBtn').addEventListener('click', async ()=>
 });
 document.getElementById('resetBtn').addEventListener('click', async ()=>{
   if(confirm('Esto borrará TODOS los registros capturados. ¿Continuar?')){
-    RECORDS = {};
-    await saveRecords();
+    await clearAllRecords();
     renderRecordList();
     toast('Registros eliminados');
   }
+});
+
+document.getElementById('conectarCloudBtn').addEventListener('click', async ()=>{
+  const cfg = {
+    apiKey: document.getElementById('fbApiKey').value.trim(),
+    authDomain: document.getElementById('fbAuthDomain').value.trim(),
+    projectId: document.getElementById('fbProjectId').value.trim(),
+    storageBucket: document.getElementById('fbStorageBucket').value.trim(),
+    messagingSenderId: document.getElementById('fbSenderId').value.trim(),
+    appId: document.getElementById('fbAppId').value.trim()
+  };
+  if(!cfg.apiKey || !cfg.authDomain || !cfg.projectId || !cfg.appId){
+    toast('Completa al menos API Key, Auth Domain, Project ID y App ID');
+    return;
+  }
+  preCloudRecords = JSON.parse(JSON.stringify(RECORDS));
+  preCloudConfig = JSON.parse(JSON.stringify(CONFIG));
+  toast('Conectando...');
+  const ok = await connectFirebase(cfg);
+  if(ok){
+    saveFirebaseConfigLocal(cfg);
+    toast('Conectado a la nube');
+    renderConfig();
+  }
+});
+
+document.getElementById('subirLocalBtn').addEventListener('click', async ()=>{
+  if(!CLOUD_MODE){ toast('Primero conéctate a la nube'); return; }
+  try{
+    const registros = preCloudRecords || RECORDS;
+    const config = preCloudConfig || CONFIG;
+    const batch = db.batch();
+    Object.entries(registros).forEach(([date, rec])=>{
+      batch.set(db.collection('records').doc(date), rec);
+    });
+    batch.set(db.collection('meta').doc('config'), config);
+    await batch.commit();
+    toast('Datos locales subidos a la nube');
+  }catch(e){
+    console.error('Error subiendo datos locales', e);
+    toast('Error al subir los datos (revisa la consola)');
+  }
+});
+
+document.getElementById('desconectarCloudBtn').addEventListener('click', async ()=>{
+  if(unsubRecords){ unsubRecords(); unsubRecords = null; }
+  if(unsubConfig){ unsubConfig(); unsubConfig = null; }
+  CLOUD_MODE = false;
+  clearFirebaseConfigLocal();
+  try{ localStorage.setItem(STORAGE_KEY_CONFIG, JSON.stringify(CONFIG)); }catch(e){ console.error(e); }
+  try{ localStorage.setItem(STORAGE_KEY_RECORDS, JSON.stringify(RECORDS)); }catch(e){ console.error(e); }
+  toast('Desconectado. Este dispositivo ahora guarda solo localmente.');
+  renderConfig();
 });
 
 /* ============================ INIT ============================ */
@@ -1127,6 +1327,11 @@ async function init(){
       renderResultados();
     }
   });
+  const savedFb = getSavedFirebaseConfig();
+  if(savedFb){
+    const ok = await connectFirebase(savedFb);
+    if(ok) renderConfig();
+  }
 }
 init();
 </script>
