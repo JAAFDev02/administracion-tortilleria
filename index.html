@@ -103,6 +103,7 @@ tfoot td{font-weight:700;background:var(--masa-2);}
 .kpi .value{font-size:24px;font-weight:800;margin-top:4px;}
 .kpi .value.good{color:var(--good);}
 .kpi .value.bad{color:var(--bad);}
+.kpi .kgeq{display:block;font-size:12px;font-weight:600;color:var(--muted);margin-top:2px;}
 .charts{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
 .charts .full{grid-column:1/-1;}
 @media (max-width:800px){.charts{grid-template-columns:1fr;}}
@@ -125,6 +126,7 @@ canvas{max-height:280px;}
 .sucBlock h3 .n{background:var(--cilantro);color:white;border-radius:6px;padding:2px 8px;font-size:11px;font-family:inherit;}
 .sucConfigBlock{border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px;}
 .sucConfigBlock .headrow{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;}
+.subval{display:block;font-size:11px;color:var(--muted);font-weight:600;}
 </style>
 </head>
 <body>
@@ -575,8 +577,17 @@ async function clearAllRecords(){
 
 /* ============================ UTILIDADES ============================ */
 function num(v){ const n = parseFloat(v); return isNaN(n) ? 0 : n; }
-function money(v){ return '$' + Math.round(v).toLocaleString('es-MX'); }
-function kg(v){ return Math.round(v*10)/10 + ' kg'; }
+function money(v){ return '$' + (v||0).toLocaleString('es-MX', {minimumFractionDigits:2, maximumFractionDigits:2}); }
+function kg(v){ return (Math.round((v||0)*10)/10).toLocaleString('es-MX', {minimumFractionDigits:1, maximumFractionDigits:1}) + ' kg'; }
+function kgNum(v){ return (Math.round((v||0)*10)/10).toLocaleString('es-MX', {minimumFractionDigits:1, maximumFractionDigits:1}); }
+function moneyKg(v){
+  const kgEq = CONFIG && CONFIG.precioKg > 0 ? v / CONFIG.precioKg : 0;
+  return `${money(v)}<span class="subval">${kgNum(kgEq)} kg equiv.</span>`;
+}
+function kgMoney(kgVal, precio){
+  const p = precio !== undefined ? precio : (CONFIG ? CONFIG.precioMerma : 0);
+  return `${kg(kgVal)}<span class="subval">${money(kgVal*p)}</span>`;
+}
 function todayStr(){ const d=new Date(); return d.toISOString().slice(0,10); }
 function monthKey(dateStr){ return dateStr.slice(0,7); }
 function yearKey(dateStr){ return dateStr.slice(0,4); }
@@ -610,13 +621,15 @@ function computeMetrics(r){
   });
   let totGastos = 0;
   CONFIG.categorias.forEach(x=> totGastos += num(r.gastos[x]));
-  const kgProducidos = totKg ;
+  // "Salida de kg" = total de KG que salió de la planta hacia las rutas (totKg).
+  // La devolución (merma) ya está contenida dentro de ese envío; no se suma aparte.
+  const kgProducidos = totKg;
   const devolucionKg = totMerma;
   const mermaPesos = totMerma * CONFIG.precioMerma;
   const deficitRecaudacion = totVenta - totRecaudado;
   const utilidadOperativa = totVenta - totGastos;
   const impuestos = utilidadOperativa > 0 ? utilidadOperativa * (CONFIG.tasaImpuesto/100) : 0;
-  const utilidadNeta = utilidadOperativa - impuestos - deficitRecaudacion;
+  const utilidadNeta = utilidadOperativa - impuestos;
   return {totKg, totMerma, totVenta, totRecaudado, totGastos, devolucionKg, mermaPesos, kgProducidos,
            deficitRecaudacion, utilidadOperativa, impuestos, utilidadNeta, porSucursal, porRuta};
 }
@@ -736,7 +749,7 @@ function updateCapturaTotals(){
   document.getElementById('totRecaudado').textContent = money(m.totRecaudado);
   document.getElementById('totGastos').textContent = money(m.totGastos);
   document.getElementById('kgProducidosView').value = kg(m.kgProducidos);
-  document.getElementById('devolucionView').value = kg(m.devolucionKg);
+  document.getElementById('devolucionView').value = kg(m.devolucionKg) + '  (' + money(m.mermaPesos) + ')';
   document.getElementById('kgNetoView').value = kg(m.kgProducidos - m.devolucionKg);
   document.getElementById('previewResumen').innerHTML =
     `Utilidad operativa: <b>${money(m.utilidadOperativa)}</b> &nbsp;|&nbsp; Utilidad neta: <b>${money(m.utilidadNeta)}</b> &nbsp;|&nbsp; Déficit recaudación: <b>${money(m.deficitRecaudacion)}</b>`;
@@ -896,8 +909,8 @@ function computeAggregation(list, vista){
     });
     m.porRuta.forEach(pr=>{
       const key = pr.sucursal + '|' + pr.ruta;
-      if(!porRutaAgg[key]) porRutaAgg[key] = {sucursal:pr.sucursal, ruta:pr.ruta, venta:0, recaudado:0, deficit:0};
-      porRutaAgg[key].venta += pr.venta; porRutaAgg[key].recaudado += pr.recaudado; porRutaAgg[key].deficit += pr.deficit;
+      if(!porRutaAgg[key]) porRutaAgg[key] = {sucursal:pr.sucursal, ruta:pr.ruta, venta:0, recaudado:0, deficit:0, merma:0};
+      porRutaAgg[key].venta += pr.venta; porRutaAgg[key].recaudado += pr.recaudado; porRutaAgg[key].deficit += pr.deficit; porRutaAgg[key].merma += pr.merma;
     });
     CONFIG.categorias.forEach(x=> porCategoria[x] += num(r.gastos[x]));
     serie.push({key:r.date, venta:m.totVenta, gastos:m.totGastos, utilidad:m.utilidadNeta});
@@ -923,6 +936,15 @@ function destroyCharts(){
   charts = {};
 }
 
+// Genera una paleta amplia y estable (misma ruta = mismo color siempre)
+const COLOR_POOL = ['#C1440E','#4C6444','#D8A13F','#5f7f9e','#9c3609','#6b8e5a','#b9945c','#8a5a3f','#a24d7c','#3f7a8c','#c26a2f','#6a7a3f','#7a4c9c','#2f8f6b','#c94f4f','#4f7fc9'];
+function colorForKey(key, cache){
+  if(cache[key] !== undefined) return cache[key];
+  const idx = Object.keys(cache).length % COLOR_POOL.length;
+  cache[key] = COLOR_POOL[idx];
+  return cache[key];
+}
+
 function renderResultados(){
   const list = getFilteredRecords();
   const vista = document.getElementById('vistaTipo').value;
@@ -941,7 +963,7 @@ function renderResultados(){
   const chartsDisponibles = typeof Chart !== 'undefined';
   const chartsSectionHtml = chartsDisponibles ? `
     <div class="charts">
-      <div class="card"><h2>Venta por sucursal</h2><canvas id="chartSucursales"></canvas></div>
+      <div class="card"><h2>Venta por sucursal y ruta</h2><canvas id="chartSucursales"></canvas></div>
       <div class="card"><h2>Gastos por categoría</h2><canvas id="chartGastos"></canvas></div>
       <div class="card full"><h2>Evolución (venta, gastos, utilidad)</h2><canvas id="chartEvolucion"></canvas></div>
     </div>
@@ -950,27 +972,27 @@ function renderResultados(){
   cont.innerHTML = `
     ${libWarningHtml()}
     <div class="kpis">
-      <div class="kpi"><div class="label">Venta total</div><div class="value">${money(agg.totVenta)}</div></div>
-      <div class="kpi"><div class="label">Recaudado total</div><div class="value">${money(agg.totRecaudado)}</div></div>
+      <div class="kpi"><div class="label">Venta total</div><div class="value">${moneyKg(agg.totVenta)}</div></div>
+      <div class="kpi"><div class="label">Recaudado total</div><div class="value">${moneyKg(agg.totRecaudado)}</div></div>
       <div class="kpi"><div class="label">Gastos totales</div><div class="value">${money(agg.totGastos)}</div></div>
       <div class="kpi"><div class="label">Utilidad operativa</div><div class="value ${agg.utilidadOperativa>=0?'good':'bad'}">${money(agg.utilidadOperativa)}</div></div>
       <div class="kpi"><div class="label">Utilidad neta</div><div class="value ${agg.utilidadNeta>=0?'good':'bad'}">${money(agg.utilidadNeta)}</div></div>
-      <div class="kpi"><div class="label">Salida de kg</div><div class="value">${Math.round(agg.kgProducidos)}</div></div>
-      <div class="kpi"><div class="label">Salida de kg − devoluciones</div><div class="value">${Math.round(agg.kgProducidos - agg.totMerma)}</div></div>
-      <div class="kpi"><div class="label">Merma / devolución</div><div class="value">${Math.round(agg.totMerma)} kg</div></div>
-      <div class="kpi"><div class="label">Déficit de recaudación</div><div class="value ${agg.deficit<=0?'good':'bad'}">${money(agg.deficit)}</div></div>
+      <div class="kpi"><div class="label">Salida de kg</div><div class="value">${kg(agg.kgProducidos)}</div></div>
+      <div class="kpi"><div class="label">Salida de kg − devoluciones</div><div class="value">${kg(agg.kgProducidos - agg.totMerma)}</div></div>
+      <div class="kpi"><div class="label">Merma / devolución</div><div class="value">${kgMoney(agg.totMerma)}</div></div>
+      <div class="kpi"><div class="label">Déficit de recaudación</div><div class="value ${agg.deficit<=0?'good':'bad'}">${moneyKg(agg.deficit)}</div></div>
     </div>
 
     ${chartsSectionHtml}
 
     <div class="card">
       <h2>Rutas con mayor déficit de recaudación</h2>
-      <div class="sub">Venta calculada vs. efectivo entregado, por ruta. Los valores positivos indican faltante.</div>
+      <div class="sub">Venta calculada vs. efectivo entregado, por ruta (con su equivalente en kg). Los valores positivos de déficit indican faltante.</div>
       <div class="table-scroll">
       <table>
-        <thead><tr><th>Sucursal</th><th>Ruta</th><th>Venta</th><th>Recaudado</th><th>Déficit</th></tr></thead>
+        <thead><tr><th>Sucursal</th><th>Ruta</th><th>Venta</th><th>Recaudado</th><th>Déficit</th><th>Devolución</th></tr></thead>
         <tbody>
-          ${rutasOrdenadas.slice(0,15).map(s=>`<tr><td>${s.sucursal}</td><td>${s.ruta}</td><td>${money(s.venta)}</td><td>${money(s.recaudado)}</td><td style="color:${s.deficit>0?'var(--bad)':'var(--good)'};font-weight:700">${money(s.deficit)}</td></tr>`).join('')}
+          ${rutasOrdenadas.slice(0,15).map(s=>`<tr><td>${s.sucursal}</td><td>${s.ruta}</td><td>${moneyKg(s.venta)}</td><td>${moneyKg(s.recaudado)}</td><td style="color:${s.deficit>0?'var(--bad)':'var(--good)'};font-weight:700">${moneyKg(s.deficit)}</td><td>${kgMoney(s.merma)}</td></tr>`).join('')}
         </tbody>
       </table>
       </div>
@@ -995,10 +1017,27 @@ function renderResultados(){
     const palette = ['#C1440E','#4C6444','#D8A13F','#8a5a3f','#5f7f9e','#9c3609','#6b8e5a','#b9945c'];
     const sucursalesNombres = CONFIG.sucursales.map(x=>x.nombre);
 
+    // --- Venta por sucursal y ruta (barras apiladas, un color distinto por ruta) ---
+    const rutaColorCache = {};
+    const rutasUnicas = [];
+    CONFIG.sucursales.forEach(suc=> suc.rutas.forEach(ruta=>{ if(!rutasUnicas.includes(ruta)) rutasUnicas.push(ruta); }));
+    const datasetsPorRuta = rutasUnicas.map(ruta=>{
+      const color = colorForKey(ruta, rutaColorCache);
+      const data = CONFIG.sucursales.map(suc=>{
+        const rec = currentReport.rutasOrdenadas.find(x=> x.sucursal===suc.nombre && x.ruta===ruta);
+        return rec ? rec.venta : 0;
+      });
+      return { label: ruta, data, backgroundColor: color };
+    });
+
     charts.sucursales = new Chart(document.getElementById('chartSucursales'), {
       type:'bar',
-      data:{ labels:sucursalesNombres, datasets:[{ label:'Venta $', data:sucursalesNombres.map(x=>porSucursalAgg[x].venta), backgroundColor: palette[0] }]},
-      options:{ plugins:{legend:{display:false}}, responsive:true, maintainAspectRatio:false }
+      data:{ labels:sucursalesNombres, datasets:datasetsPorRuta },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        scales:{ x:{ stacked:true }, y:{ stacked:true } },
+        plugins:{ legend:{ position:'bottom', labels:{ boxWidth:12, font:{size:10} } } }
+      }
     });
 
     charts.gastos = new Chart(document.getElementById('chartGastos'), {
@@ -1030,40 +1069,42 @@ document.getElementById('exportExcelBtn').addEventListener('click', ()=>{
   if(!currentReport){ toast('No hay datos para exportar en este periodo'); return; }
   if(typeof XLSX === 'undefined'){ toast('No se pudo cargar el generador de Excel. Revisa tu conexión.'); return; }
   try{
-    const {agg, porRutaAggList, rutasOrdenadas, porCategoria, serieFinal, vista, periodoLabel} = currentReport;
+    const {agg, rutasOrdenadas, porCategoria, serieFinal, vista, periodoLabel} = currentReport;
     const wb = XLSX.utils.book_new();
+
+    const kgEq = (v)=> CONFIG.precioKg>0 ? +(v/CONFIG.precioKg).toFixed(1) : 0;
 
     const resumenData = [
       ['Reporte Control Tortillería'],
       ['Periodo', periodoLabel],
       [],
-      ['Indicador', 'Valor'],
-      ['Venta total', Math.round(agg.totVenta)],
-      ['Recaudado total', Math.round(agg.totRecaudado)],
-      ['Gastos totales', Math.round(agg.totGastos)],
-      ['Utilidad operativa', Math.round(agg.utilidadOperativa)],
-      ['Impuestos', Math.round(agg.utilidadOperativa>0 ? (agg.utilidadOperativa-agg.utilidadNeta) : 0)],
-      ['Utilidad neta', Math.round(agg.utilidadNeta)],
-      ['Salida de kg', Math.round(agg.kgProducidos)],
-      ['Merma / devolución (kg)', Math.round(agg.totMerma)],
-      ['Salida de kg − devoluciones', Math.round(agg.kgProducidos - agg.totMerma)],
-      ['Déficit de recaudación', Math.round(agg.deficit)]
+      ['Indicador', 'Valor $', 'Equivalente KG'],
+      ['Venta total', +agg.totVenta.toFixed(2), kgEq(agg.totVenta)],
+      ['Recaudado total', +agg.totRecaudado.toFixed(2), kgEq(agg.totRecaudado)],
+      ['Gastos totales', +agg.totGastos.toFixed(2), ''],
+      ['Utilidad operativa', +agg.utilidadOperativa.toFixed(2), ''],
+      ['Impuestos', +(agg.utilidadOperativa>0 ? (agg.utilidadOperativa-agg.utilidadNeta) : 0).toFixed(2), ''],
+      ['Utilidad neta', +agg.utilidadNeta.toFixed(2), ''],
+      ['Salida de kg', '', +agg.kgProducidos.toFixed(1)],
+      ['Merma / devolución (kg)', +(agg.totMerma*CONFIG.precioMerma).toFixed(2), +agg.totMerma.toFixed(1)],
+      ['Salida de kg − devoluciones', '', +(agg.kgProducidos - agg.totMerma).toFixed(1)],
+      ['Déficit de recaudación', +agg.deficit.toFixed(2), kgEq(agg.deficit)]
     ];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(resumenData), 'Resumen');
 
     const detalleHeader = [vista==='anual' ? 'Mes' : 'Fecha', 'Venta', 'Gastos', 'Utilidad neta'];
     const detalleRows = serieFinal.map(s=>[
       vista==='anual' ? (MESES[parseInt(s.key.slice(5,7))-1] + ' ' + s.key.slice(0,4)) : s.key,
-      Math.round(s.venta), Math.round(s.gastos), Math.round(s.utilidad)
+      +s.venta.toFixed(2), +s.gastos.toFixed(2), +s.utilidad.toFixed(2)
     ]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([detalleHeader, ...detalleRows]), 'Detalle');
 
-    const rutasHeader = ['Sucursal','Ruta','Venta','Recaudado','Déficit'];
-    const rutasRows = rutasOrdenadas.map(r=>[r.sucursal, r.ruta, Math.round(r.venta), Math.round(r.recaudado), Math.round(r.deficit)]);
+    const rutasHeader = ['Sucursal','Ruta','Venta','Venta (kg equiv.)','Recaudado','Déficit','Devolución (kg)','Devolución ($)'];
+    const rutasRows = rutasOrdenadas.map(r=>[r.sucursal, r.ruta, +r.venta.toFixed(2), kgEq(r.venta), +r.recaudado.toFixed(2), +r.deficit.toFixed(2), +r.merma.toFixed(1), +(r.merma*CONFIG.precioMerma).toFixed(2)]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([rutasHeader, ...rutasRows]), 'Rutas');
 
     const gastosHeader = ['Categoría','Monto'];
-    const gastosRows = CONFIG.categorias.map(c=>[c, Math.round(porCategoria[c])]);
+    const gastosRows = CONFIG.categorias.map(c=>[c, +porCategoria[c].toFixed(2)]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([gastosHeader, ...gastosRows]), 'Gastos');
 
     XLSX.writeFile(wb, `reporte_tortilleria_${getPeriodoLabel()}.xlsx`);
@@ -1083,6 +1124,7 @@ document.getElementById('exportPdfBtn').addEventListener('click', ()=>{
     const {agg, rutasOrdenadas, serieFinal, vista, periodoLabel} = currentReport;
     const margin = 40;
     let y = margin;
+    const kgEq = (v)=> CONFIG.precioKg>0 ? (v/CONFIG.precioKg).toFixed(1) : '0.0';
 
     doc.setFontSize(18); doc.setTextColor(43,33,24);
     doc.text('Reporte — Control Tortillería', margin, y); y += 20;
@@ -1091,15 +1133,15 @@ document.getElementById('exportPdfBtn').addEventListener('click', ()=>{
 
     doc.setFontSize(12); doc.setTextColor(43,33,24);
     const kpiLines = [
-      ['Venta total', money(agg.totVenta)],
-      ['Recaudado total', money(agg.totRecaudado)],
+      ['Venta total', money(agg.totVenta) + ' (' + kgEq(agg.totVenta) + ' kg)'],
+      ['Recaudado total', money(agg.totRecaudado) + ' (' + kgEq(agg.totRecaudado) + ' kg)'],
       ['Gastos totales', money(agg.totGastos)],
       ['Utilidad operativa', money(agg.utilidadOperativa)],
       ['Utilidad neta', money(agg.utilidadNeta)],
-      ['Salida de kg', Math.round(agg.kgProducidos)+' kg'],
-      ['Merma / devolución', Math.round(agg.totMerma)+' kg'],
-      ['Salida de kg − devoluciones', Math.round(agg.kgProducidos - agg.totMerma)+' kg'],
-      ['Déficit de recaudación', money(agg.deficit)]
+      ['Salida de kg', agg.kgProducidos.toFixed(1)+' kg'],
+      ['Merma / devolución', agg.totMerma.toFixed(1)+' kg (' + money(agg.totMerma*CONFIG.precioMerma) + ')'],
+      ['Salida de kg − devoluciones', (agg.kgProducidos - agg.totMerma).toFixed(1)+' kg'],
+      ['Déficit de recaudación', money(agg.deficit) + ' (' + kgEq(agg.deficit) + ' kg)']
     ];
     doc.autoTable({
       startY: y, margin:{left:margin,right:margin},
@@ -1133,13 +1175,13 @@ document.getElementById('exportPdfBtn').addEventListener('click', ()=>{
     });
     y = doc.lastAutoTable.finalY + 20;
 
-    if(y > 650){ doc.addPage(); y = margin; }
+    if(y > 600){ doc.addPage(); y = margin; }
     doc.setFontSize(13); doc.text('Rutas con mayor déficit', margin, y); y += 10;
     doc.autoTable({
       startY: y, margin:{left:margin,right:margin},
-      head:[['Sucursal','Ruta','Venta','Recaudado','Déficit']],
-      body: rutasOrdenadas.slice(0,20).map(s=>[s.sucursal, s.ruta, money(s.venta), money(s.recaudado), money(s.deficit)]),
-      styles:{fontSize:9}, headStyles:{fillColor:[76,100,68]}
+      head:[['Sucursal','Ruta','Venta','Recaudado','Déficit','Devolución']],
+      body: rutasOrdenadas.slice(0,20).map(s=>[s.sucursal, s.ruta, money(s.venta)+' ('+kgEq(s.venta)+' kg)', money(s.recaudado), money(s.deficit), s.merma.toFixed(1)+' kg ('+money(s.merma*CONFIG.precioMerma)+')']),
+      styles:{fontSize:8}, headStyles:{fillColor:[76,100,68]}
     });
 
     doc.save(`reporte_tortilleria_${getPeriodoLabel()}.pdf`);
@@ -1309,6 +1351,12 @@ document.getElementById('desconectarCloudBtn').addEventListener('click', async (
   try{ localStorage.setItem(STORAGE_KEY_RECORDS, JSON.stringify(RECORDS)); }catch(e){ console.error(e); }
   toast('Desconectado. Este dispositivo ahora guarda solo localmente.');
   renderConfig();
+});
+
+document.addEventListener('focusin', (e)=>{
+  if(e.target.matches('input[type="number"]')){
+    e.target.select();
+  }
 });
 
 /* ============================ INIT ============================ */
